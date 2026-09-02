@@ -36,6 +36,13 @@
       font-family:'Inter',sans-serif;font-size:13px;font-weight:500;padding:7px 12px;
       border-radius:var(--radius-s);cursor:pointer;}
     .ghost-btn:hover{border-color:var(--leather);color:var(--leather-dark);}
+    .topbar-actions{display:flex;gap:8px;}
+    .icon-btn{display:flex;align-items:center;gap:6px;}
+    .icon-btn svg{flex-shrink:0;}
+    .icon-btn.spinning svg{animation:spin 0.8s linear infinite;}
+    @keyframes spin{from{transform:rotate(0deg);}to{transform:rotate(360deg);}}
+    .icon-btn.ok{border-color:var(--in);color:var(--in);}
+    .icon-btn.fail{border-color:var(--out);color:var(--out);}
 
     .direction-toggle{display:flex;background:var(--surface);border:1px solid var(--border);
       border-radius:var(--radius-m);padding:4px;gap:4px;margin-bottom:14px;}
@@ -82,7 +89,7 @@
       overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
     .qi-location{width:100%;border:none;border-bottom:1px dashed var(--border);background:transparent;
       font-family:'Inter',sans-serif;font-size:12.5px;color:var(--leather-dark);padding:3px 0 4px;
-      margin-top:2px;}
+      margin-top:2px;text-transform:uppercase;}
     .qi-location:focus{outline:none;border-bottom:1px solid var(--leather);}
     .qi-location::placeholder{color:var(--out);}
     .qi-meta{font-size:11px;color:var(--ink-muted);display:block;margin-top:2px;
@@ -136,7 +143,13 @@
   <div class="app">
     <div class="topbar">
       <div class="brand">UC5 · Warehouse</div>
-      <button class="ghost-btn" id="stockBtn">Stock levels</button>
+      <div class="topbar-actions">
+        <button class="ghost-btn icon-btn" id="refreshBtn" title="Check connection to the sheet">
+          <svg id="refreshIcon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 4v6h-6"/></svg>
+          Refresh
+        </button>
+        <button class="ghost-btn" id="stockBtn">Stock levels</button>
+      </div>
     </div>
 
     <div class="direction-toggle">
@@ -145,8 +158,8 @@
     </div>
 
     <div class="field" id="locationField">
-      <label for="locationInput">Location for next scans (e.g. Rack B-4)</label>
-      <input id="locationInput" autocomplete="off">
+      <label for="locationInput">Location for next scans (e.g. RACK B-4)</label>
+      <input id="locationInput" autocomplete="off" style="text-transform:uppercase" autocapitalize="characters">
       <div class="field-hint">Change this any time you move to a different bin — each scan below keeps the location it was scanned with.</div>
     </div>
 
@@ -192,6 +205,30 @@
   </div>
 
 <script>
+  // ---------- Backend connection ----------
+  // Paste your deployed Apps Script Web App URL here (Deploy > Manage deployments
+  // > Web app > URL). It must end in /exec, and the deployment's "Who has
+  // access" must be set to "Anyone" for this page (on GitHub Pages) to reach it.
+  var WEBAPP_URL = 'PASTE_YOUR_APPS_SCRIPT_WEB_APP_URL_HERE';
+
+  function apiGet(action, params) {
+    var url = WEBAPP_URL + '?action=' + encodeURIComponent(action);
+    Object.keys(params || {}).forEach(function (k) {
+      url += '&' + encodeURIComponent(k) + '=' + encodeURIComponent(params[k]);
+    });
+    return fetch(url).then(function (r) { return r.json(); });
+  }
+
+  function apiPost(action, payload) {
+    // text/plain avoids a CORS preflight request, which Apps Script web apps
+    // don't handle — Apps Script only replies correctly to "simple" requests.
+    return fetch(WEBAPP_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: action, payload: payload })
+    }).then(function (r) { return r.json(); });
+  }
+
   // ---------- State ----------
   var direction = 'IN';                 // 'IN' | 'OUT'
   // queue is keyed by "code||location" so the same item code can appear as
@@ -216,6 +253,7 @@
     chimeToggle: document.getElementById('chimeToggle'),
     toast: document.getElementById('toast'),
     stockBtn: document.getElementById('stockBtn'),
+    refreshBtn: document.getElementById('refreshBtn'),
     closeStockBtn: document.getElementById('closeStockBtn'),
     stockPanel: document.getElementById('stockPanel'),
     stockTableBody: document.getElementById('stockTableBody')
@@ -264,6 +302,16 @@
     });
   });
   els.submitBtn.textContent = 'Submit batch — Stock In';
+
+  // Location text is always stored/displayed in caps (bin codes, e.g. RACK B-4).
+  function forceUppercase(el) {
+    el.addEventListener('input', function () {
+      var pos = el.selectionStart;
+      el.value = el.value.toUpperCase();
+      if (pos !== null && el.setSelectionRange) el.setSelectionRange(pos, pos);
+    });
+  }
+  forceUppercase(els.locationInput);
 
   // ---------- Queue management ----------
   function queueKey(code, location) { return code + '||' + location; }
@@ -315,13 +363,14 @@
 
   var previewCache = {};
   function fetchPreview(code) {
-    google.script.run
-      .withSuccessHandler(function (info) {
-        previewCache[code] = info;
-        renderQueue();
+    apiGet('lookupItem', { code: code })
+      .then(function (res) {
+        if (res && res.ok) {
+          previewCache[code] = res.item;
+          renderQueue();
+        }
       })
-      .withFailureHandler(function () { /* silent - preview is a nicety */ })
-      .lookupItem(code);
+      .catch(function () { /* silent - preview is a nicety */ });
   }
 
   function totalUnits() {
@@ -349,7 +398,7 @@
         li.innerHTML =
           '<div class="qi-main">' +
             '<div class="qi-code">' + escapeHtml(row.code) + '</div>' +
-            '<input class="qi-location" type="text" value="' + escapeHtml(row.location) + '" placeholder="No location set">' +
+            '<input class="qi-location" type="text" value="' + escapeHtml(row.location) + '" placeholder="No location set" autocapitalize="characters">' +
             (stockText ? '<span class="qi-meta">' + escapeHtml(stockText) + '</span>' : '') +
           '</div>' +
           '<div class="qi-stepper">' +
@@ -362,6 +411,7 @@
         li.querySelector('[data-act="inc"]').addEventListener('click', function () { changeQty(key, 1); });
         li.querySelector('[data-act="rm"]').addEventListener('click', function () { removeFromQueue(key); });
         var locInput = li.querySelector('.qi-location');
+        forceUppercase(locInput);
         locInput.addEventListener('change', function () { changeLocation(key, locInput.value); });
         els.queueList.appendChild(li);
       });
@@ -427,8 +477,8 @@
     els.submitBtn.disabled = true;
     els.submitBtn.textContent = 'Submitting…';
 
-    google.script.run
-      .withSuccessHandler(function (res) {
+    apiPost('submitScans', payload)
+      .then(function (res) {
         if (res && res.ok) {
           chimeSuccess();
           showToast(keys.length + ' row(s) recorded and stock updated.', 'success');
@@ -442,21 +492,50 @@
         els.submitBtn.textContent = direction === 'IN' ? 'Submit batch — Stock In' : 'Submit batch — Stock Out';
         renderQueue();
       })
-      .withFailureHandler(function (err) {
+      .catch(function (err) {
         chimeError();
         showToast('Save failed: ' + err.message, 'error');
         els.submitBtn.textContent = direction === 'IN' ? 'Submit batch — Stock In' : 'Submit batch — Stock Out';
         els.submitBtn.disabled = false;
+      });
+  });
+
+  // ---------- Refresh / connection check ----------
+  els.refreshBtn.addEventListener('click', function () {
+    els.refreshBtn.classList.remove('ok', 'fail');
+    els.refreshBtn.classList.add('spinning');
+    els.refreshBtn.disabled = true;
+    apiGet('ping')
+      .then(function (res) {
+        els.refreshBtn.classList.remove('spinning');
+        els.refreshBtn.disabled = false;
+        if (res && res.ok && res.sheets) {
+          els.refreshBtn.classList.add('ok');
+          showToast('Connected to "' + res.spreadsheetName + '".', 'success');
+          Object.keys(queue).forEach(function (k) { fetchPreview(queue[k].code); });
+          if (!els.stockPanel.classList.contains('hidden')) els.stockBtn.click();
+        } else {
+          els.refreshBtn.classList.add('fail');
+          showToast('Connected, but one or more sheet tabs are missing or misnamed.', 'error');
+        }
+        setTimeout(function () { els.refreshBtn.classList.remove('ok', 'fail'); }, 3000);
       })
-      .submitScans(payload);
+      .catch(function (err) {
+        els.refreshBtn.classList.remove('spinning');
+        els.refreshBtn.classList.add('fail');
+        els.refreshBtn.disabled = false;
+        showToast('Connection failed: ' + err.message, 'error');
+        setTimeout(function () { els.refreshBtn.classList.remove('fail'); }, 3000);
+      });
   });
 
   // ---------- Stock levels panel ----------
   els.stockBtn.addEventListener('click', function () {
     els.stockPanel.classList.remove('hidden');
     els.stockTableBody.innerHTML = '<tr><td colspan="3">Loading…</td></tr>';
-    google.script.run
-      .withSuccessHandler(function (rows) {
+    apiGet('getCurrentStock')
+      .then(function (res) {
+        var rows = (res && res.ok) ? res.stock : [];
         if (!rows.length) {
           els.stockTableBody.innerHTML = '<tr><td colspan="3">No stock recorded yet.</td></tr>';
           return;
@@ -465,10 +544,9 @@
           return '<tr><td>' + escapeHtml(r.code) + '</td><td>' + r.quantity + '</td><td>' + escapeHtml(r.location || '') + '</td></tr>';
         }).join('');
       })
-      .withFailureHandler(function (err) {
+      .catch(function (err) {
         els.stockTableBody.innerHTML = '<tr><td colspan="3">Failed to load: ' + escapeHtml(err.message) + '</td></tr>';
-      })
-      .getCurrentStock();
+      });
   });
   els.closeStockBtn.addEventListener('click', function () {
     els.stockPanel.classList.add('hidden');
